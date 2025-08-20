@@ -4,80 +4,92 @@ import numpy as np
 import plotly.express as px
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import requests
-import json
+import boto3
+
+# ----------------------
+# Initialization
+# ----------------------
 
 # Initialize VADER analyzer
 vader_analyzer = SentimentIntensityAnalyzer()
 
-# Configuration variables
+# Default example text
 default_text = "I love this product! It's amazing and works perfectly."
 
-# Sidebar configuration
-st.sidebar.header("Configuration")
-use_vader = st.sidebar.checkbox("Use VADER", value=True, help="Free offline sentiment analysis")
-use_hf = st.sidebar.checkbox("Use Hugging Face", value=False, help="Requires API token")
-use_aws = st.sidebar.checkbox("Use AWS Comprehend", value=False, help="Requires AWS credentials")
-
-# API Keys
+# API Keys (fallback defaults)
 hf_token = ""
 aws_key = ""
 aws_secret = ""
 aws_region = "us-east-1"
 
-if use_hf:
-    hf_token = st.sidebar.text_input("Hugging Face API Token", type="password", 
-                                    help="Get free token at https://huggingface.co/settings/tokens")
+# ✅ Load secrets from .streamlit/secrets.toml (if available)
+if "HF_TOKEN" in st.secrets:
+    hf_token = st.secrets["HF_TOKEN"]
 
-if use_aws:
+if "AWS_ACCESS_KEY" in st.secrets and "AWS_SECRET_KEY" in st.secrets:
+    aws_key = st.secrets["AWS_ACCESS_KEY"]
+    aws_secret = st.secrets["AWS_SECRET_KEY"]
+    aws_region = st.secrets.get("AWS_REGION", aws_region)
+
+# Debug check (won’t leak actual secrets)
+st.sidebar.write("🔒 Secrets loaded:", {
+    "HF_TOKEN": "HF_TOKEN" in st.secrets,
+    "AWS_ACCESS_KEY": "AWS_ACCESS_KEY" in st.secrets
+})
+
+# ----------------------
+# Sidebar configuration
+# ----------------------
+st.sidebar.header("Configuration")
+use_vader = st.sidebar.checkbox("Use VADER", value=True, help="Free offline sentiment analysis")
+use_hf = st.sidebar.checkbox("Use Hugging Face", value=False, help="Requires API token")
+use_aws = st.sidebar.checkbox("Use AWS Comprehend", value=False, help="Requires AWS credentials")
+
+# ✅ Fallback to sidebar inputs if secrets are missing
+if use_hf and not hf_token:
+    hf_token = st.sidebar.text_input(
+        "Hugging Face API Token", 
+        type="password", 
+        help="Get free token at https://huggingface.co/settings/tokens"
+    )
+
+if use_aws and (not aws_key or not aws_secret):
     aws_key = st.sidebar.text_input("AWS Access Key", type="password")
     aws_secret = st.sidebar.text_input("AWS Secret Key", type="password")
     aws_region = st.sidebar.selectbox("AWS Region", ["us-east-1", "us-west-2", "eu-west-1"])
 
+# ----------------------
+# Sentiment Functions
+# ----------------------
+
 def analyze_text_hf(text, hf_token=""):
     """Analyze text using Hugging Face API"""
     try:
-        # Use a simple, reliable free model
         API_URL = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment"
-        
         headers = {"Content-Type": "application/json"}
         if hf_token:
             headers["Authorization"] = f"Bearer {hf_token}"
-        
-        # Make the request
+
         response = requests.post(API_URL, headers=headers, json={"inputs": text})
-        
+
         if response.status_code == 200:
             results = response.json()
-            
-            # Handle different response formats
             if isinstance(results, list) and len(results) > 0:
                 scores = results[0] if isinstance(results[0], list) else results
-                
-                # Convert to standardized format
                 probs = {"Positive": 0, "Negative": 0, "Neutral": 0, "Mixed": 0}
-                
                 for item in scores:
                     label = item['label'].upper()
                     score = item['score']
-                    
                     if 'POSITIVE' in label or label == 'LABEL_2':
                         probs["Positive"] = score
                     elif 'NEGATIVE' in label or label == 'LABEL_0':
                         probs["Negative"] = score
                     elif 'NEUTRAL' in label or label == 'LABEL_1':
                         probs["Neutral"] = score
-                
-                # Determine primary label
                 max_label = max(probs, key=probs.get)
                 max_score = probs[max_label]
-                
-                return {
-                    "provider": "Hugging Face",
-                    "label": max_label,
-                    "score": max_score,
-                    "probs": probs
-                }
-        
+                return {"provider": "Hugging Face", "label": max_label, "score": max_score, "probs": probs}
+
         elif response.status_code == 503:
             return {"provider": "Hugging Face", "error": "Model is loading, try again in a few seconds"}
         elif response.status_code == 402:
@@ -86,63 +98,70 @@ def analyze_text_hf(text, hf_token=""):
             return {"provider": "Hugging Face", "error": "Model not found"}
         else:
             return {"provider": "Hugging Face", "error": f"API Error: {response.status_code}"}
-    
+
     except requests.exceptions.RequestException as e:
         return {"provider": "Hugging Face", "error": f"Network error: {str(e)}"}
     except Exception as e:
         return {"provider": "Hugging Face", "error": f"Unexpected error: {str(e)}"}
 
+
 def analyze_text_vader(text):
     """Analyze text using VADER sentiment"""
     try:
         scores = vader_analyzer.polarity_scores(text)
-        
-        # Convert VADER scores to standardized format
         probs = {
             "Positive": scores['pos'],
-            "Negative": scores['neg'], 
+            "Negative": scores['neg'],
             "Neutral": scores['neu'],
-            "Mixed": 0  # VADER doesn't have mixed, so set to 0
+            "Mixed": 0
         }
-        
-        # Determine label based on compound score
         compound = scores['compound']
         if compound >= 0.05:
             label = "Positive"
         elif compound <= -0.05:
-            label = "Negative" 
+            label = "Negative"
         else:
             label = "Neutral"
-            
-        return {
-            "provider": "VADER",
-            "label": label,
-            "score": abs(compound),
-            "probs": probs
-        }
-    
+        return {"provider": "VADER", "label": label, "score": abs(compound), "probs": probs}
     except Exception as e:
         return {"provider": "VADER", "error": str(e)}
 
+
 def analyze_text_aws(text, aws_key, aws_secret, aws_region):
-    """Analyze text using AWS Comprehend (placeholder - requires boto3)"""
-    # This is a placeholder - you'd need to implement AWS Comprehend integration
-    return {"provider": "AWS Comprehend", "error": "AWS integration not implemented"}
+    """Analyze text using AWS Comprehend"""
+    try:
+        client = boto3.client(
+            "comprehend",
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
+            region_name=aws_region,
+        )
+        response = client.detect_sentiment(Text=text, LanguageCode="en")
+        sentiment = response["Sentiment"]
+        scores = response["SentimentScore"]
+
+        probs = {
+            "Positive": scores["Positive"],
+            "Negative": scores["Negative"],
+            "Neutral": scores["Neutral"],
+            "Mixed": scores["Mixed"],
+        }
+        return {"provider": "AWS Comprehend", "label": sentiment, "score": max(probs.values()), "probs": probs}
+    except Exception as e:
+        return {"provider": "AWS Comprehend", "error": str(e)}
+
 
 def analyze_text(text, use_hf=True, use_vader=True, use_aws=False, hf_token="", aws_key="", aws_secret="", aws_region=""):
     """Main function to analyze text using multiple providers"""
     results = []
-    
     if use_vader:
         results.append(analyze_text_vader(text))
-    
     if use_hf:
         results.append(analyze_text_hf(text, hf_token))
-        
     if use_aws and aws_key and aws_secret:
         results.append(analyze_text_aws(text, aws_key, aws_secret, aws_region))
-    
     return results
+
 
 def results_to_dataframe(results):
     """Convert results to DataFrame"""
@@ -169,19 +188,19 @@ def results_to_dataframe(results):
                 "Neutral": p.get("Neutral", np.nan),
                 "Mixed": p.get("Mixed", np.nan)
             })
-    
     return pd.DataFrame(rows)
 
-# Streamlit app title
+# ----------------------
+# Streamlit UI
+# ----------------------
 st.title("Sentiment Analysis Dashboard")
 st.markdown("Analyze text sentiment using multiple providers")
 
-# Create the tabs
 tab_single, tab_batch = st.tabs(["Single Text Analysis", "Batch CSV Analysis"])
 
-# ========================
-# Tab: Single Text (Modified Visualization)
-# ========================
+# ----------------------
+# Tab: Single Text
+# ----------------------
 with tab_single:
     st.subheader("Analyze a single text")
     text = st.text_area("Enter text to analyze:", value=default_text, height=150)
@@ -205,7 +224,6 @@ with tab_single:
             st.subheader("Results")
             st.dataframe(df, use_container_width=True)
 
-            # Provider summary cards
             st.markdown("### Provider Insights")
             for r in results:
                 with st.container(border=True):
@@ -215,8 +233,6 @@ with tab_single:
                         p = r["probs"]
                         st.markdown(f"**{r['provider']}**")
                         st.write(f"**Label:** {r['label']}  |  **Confidence:** {round(r['score'], 4)}")
-
-                        # Pie chart per provider
                         pie_df = pd.DataFrame({
                             "Class": ["Positive", "Negative", "Neutral", "Mixed"],
                             "Probability": [p["Positive"], p["Negative"], p["Neutral"], p["Mixed"]]
@@ -225,7 +241,6 @@ with tab_single:
                                          title=f"Distribution - {r['provider']}")
                         st.plotly_chart(pie_fig, use_container_width=True)
 
-            # Comparison bar chart
             st.markdown("### Provider Comparison (Bar Chart)")
             plot_df = df.melt(id_vars=["Provider", "Label"],
                               value_vars=["Positive", "Negative", "Neutral", "Mixed"],
@@ -238,10 +253,9 @@ with tab_single:
                 fig.update_layout(yaxis_range=[0, 1], xaxis_title="", yaxis_title="Probability")
                 st.plotly_chart(fig, use_container_width=True)
 
-
-# ========================
-# Tab: Batch CSV (Extra Visualization)
-# ========================
+# ----------------------
+# Tab: Batch CSV
+# ----------------------
 with tab_batch:
     st.subheader("Batch sentiment on CSV")
     st.write("Upload a CSV and choose a text column. Results can be downloaded as CSV.")
@@ -296,7 +310,6 @@ with tab_batch:
             st.success("Batch complete.")
             st.dataframe(df_out, use_container_width=True)
 
-            # Visualization: Overall sentiment distribution
             st.markdown("### Sentiment Distribution Across Dataset")
             dist_df = df_out[df_out["label"] != "ERROR"]["label"].value_counts().reset_index()
             dist_df.columns = ["Sentiment", "Count"]
@@ -305,7 +318,6 @@ with tab_batch:
             dist_fig.update_traces(textposition="outside")
             st.plotly_chart(dist_fig, use_container_width=True)
 
-            # Merge back + downloads
             pivot = df_out.pivot_table(index="index",
                                        columns="provider",
                                        values="label",
