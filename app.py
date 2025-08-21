@@ -194,6 +194,36 @@ with tab_single:
     if run_btn and text.strip():
         with st.spinner("Running analysis..."):
             results = analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
+            def results_to_dataframe(results):
+                """
+                Convert results list of dicts to a pandas DataFrame for display.
+                """
+                rows = []
+                for r in results:
+                    if "error" in r:
+                        rows.append({
+                            "Provider": r.get("provider", ""),
+                            "Label": "ERROR",
+                            "Score": None,
+                            "Positive": None,
+                            "Negative": None,
+                            "Neutral": None,
+                            "Mixed": None,
+                            "Error": r["error"]
+                        })
+                    else:
+                        p = r.get("probs", {})
+                        rows.append({
+                            "Provider": r.get("provider", ""),
+                            "Label": r.get("label", ""),
+                            "Score": r.get("score", None),
+                            "Positive": p.get("Positive", None),
+                            "Negative": p.get("Negative", None),
+                            "Neutral": p.get("Neutral", None),
+                            "Mixed": p.get("Mixed", None),
+                            "Error": ""
+                        })
+                return pd.DataFrame(rows)
             df = results_to_dataframe(results)
 
         with colB:
@@ -228,6 +258,7 @@ with tab_single:
                 fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
                 fig.update_layout(yaxis_range=[0, 1], xaxis_title="", yaxis_title="Probability")
                 st.plotly_chart(fig, use_container_width=True)
+
 
 
 
