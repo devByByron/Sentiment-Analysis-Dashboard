@@ -1,9 +1,8 @@
-
-numpy==2.3.2
-pandas==2.2.2
-streamlit==1.48.0
-transformers==4.55.2
-torch==2.8.0
-boto3==1.40.11
-vaderSentiment==3.3.2
-plotly==5.24.1
+numpy
+pandas
+streamlit
+transformers
+torch
+boto3
+vaderSentiment
+plotly
