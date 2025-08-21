@@ -180,8 +180,7 @@ def analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret
         try:
             # Try multiple models in order of preference
             models_to_try = [
-                "cardiffnlp/twitter-roberta-base-sentiment-latest",
-                "cardiffnlp/twitter-roberta-base-sentiment-v1", 
+                "cardiffnlp/twitter-roberta-base-sentiment",
                 "distilbert-base-uncased-finetuned-sst-2-english"
             ]
             
