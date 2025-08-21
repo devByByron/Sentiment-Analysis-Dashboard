@@ -16,26 +16,23 @@ vader_analyzer = SentimentIntensityAnalyzer()
 # Default example text
 default_text = "I love this product! It's amazing and works perfectly."
 
-# API Keys (fallback defaults)
+# ----------------------
+# Secrets & API Keys
+# ----------------------
+
+# Default values
 hf_token = ""
 aws_key = ""
 aws_secret = ""
 aws_region = "us-east-1"
 
-# ✅ Load secrets from .streamlit/secrets.toml (if available)
-if "HF_TOKEN" in st.secrets:
-    hf_token = st.secrets["HF_TOKEN"]
+# ✅ Load Hugging Face token from Streamlit secrets
+hf_token = st.secrets.get("HF_TOKEN", "")
 
-if "AWS_ACCESS_KEY" in st.secrets and "AWS_SECRET_KEY" in st.secrets:
-    aws_key = st.secrets["AWS_ACCESS_KEY"]
-    aws_secret = st.secrets["AWS_SECRET_KEY"]
-    aws_region = st.secrets.get("AWS_REGION", aws_region)
-
-# # Debug check (won’t leak actual secrets)
-# st.sidebar.write("🔒 Secrets loaded:", {
-#     "HF_TOKEN": "HF_TOKEN" in st.secrets,
-#     "AWS_ACCESS_KEY": "AWS_ACCESS_KEY" in st.secrets
-# })
+# ✅ Load AWS credentials from Streamlit secrets
+aws_key = st.secrets.get("AWS_ACCESS_KEY", "")
+aws_secret = st.secrets.get("AWS_SECRET_KEY", "")
+aws_region = st.secrets.get("AWS_REGION", "us-east-1")
 
 # ----------------------
 # Sidebar configuration
@@ -48,8 +45,8 @@ use_aws = st.sidebar.checkbox("Use AWS Comprehend", value=False, help="Requires 
 # ✅ Fallback to sidebar inputs if secrets are missing
 if use_hf and not hf_token:
     hf_token = st.sidebar.text_input(
-        "Hugging Face API Token", 
-        type="password", 
+        "Hugging Face API Token",
+        type="password",
         help="Get free token at https://huggingface.co/settings/tokens"
     )
 
@@ -129,6 +126,8 @@ def analyze_text_vader(text):
 
 def analyze_text_aws(text, aws_key, aws_secret, aws_region):
     """Analyze text using AWS Comprehend"""
+    if not (aws_key and aws_secret):
+        return {"provider": "AWS Comprehend", "error": "Missing AWS credentials"}
     try:
         client = boto3.client(
             "comprehend",
@@ -208,12 +207,6 @@ with tab_single:
 
     with colA:
         run_btn = st.button("Analyze", type="primary")
-        st.write("")
-
-        # if use_aws:
-        #     st.info("AWS Comprehend is enabled. Charges may apply after free tier.", icon="⚠️")
-        # else:
-        #     st.success("Free-only mode (Hugging Face + VADER).", icon="✅")
 
     if run_btn and text.strip():
         with st.spinner("Running analysis..."):
