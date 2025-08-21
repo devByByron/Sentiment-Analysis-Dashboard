@@ -183,7 +183,55 @@ tab_single, tab_batch = st.tabs(["Single Text Analysis", "Batch CSV Analysis"])
 # ----------------------
 # Tab: Single Text
 # ----------------------
-# (⚡ unchanged single text tab …)
+with tab_single:
+    st.subheader("Analyze a single text")
+    text = st.text_area("Enter text to analyze:", value=default_text, height=150)
+    colA, colB = st.columns([1, 2])
+
+    with colA:
+        run_btn = st.button("Analyze", type="primary")
+
+    if run_btn and text.strip():
+        with st.spinner("Running analysis..."):
+            results = analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
+            df = results_to_dataframe(results)
+
+        with colB:
+            st.subheader("Results")
+            st.dataframe(df, use_container_width=True)
+
+            st.markdown("### Provider Insights")
+            for r in results:
+                with st.container(border=True):
+                    if "error" in r:
+                        st.error(f"**{r.get('provider','')}**: {r['error']}")
+                    else:
+                        p = r["probs"]
+                        st.markdown(f"**{r['provider']}**")
+                        st.write(f"**Label:** {r['label']}  |  **Confidence:** {round(r['score'], 4)}")
+                        pie_df = pd.DataFrame({
+                            "Class": ["Positive", "Negative", "Neutral", "Mixed"],
+                            "Probability": [p["Positive"], p["Negative"], p["Neutral"], p["Mixed"]]
+                        })
+                        pie_fig = px.pie(pie_df, names="Class", values="Probability",
+                                         title=f"Distribution - {r['provider']}")
+                        st.plotly_chart(pie_fig, use_container_width=True)
+
+            st.markdown("### Provider Comparison (Bar Chart)")
+            plot_df = df.melt(id_vars=["Provider", "Label"],
+                              value_vars=["Positive", "Negative", "Neutral", "Mixed"],
+                              var_name="Class", value_name="Probability").dropna()
+            if not plot_df.empty:
+                fig = px.bar(plot_df, x="Provider", y="Probability", color="Class",
+                             barmode="group", text="Probability",
+                             title="Class Probabilities by Provider")
+                fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                fig.update_layout(yaxis_range=[0, 1], xaxis_title="", yaxis_title="Probability")
+                st.plotly_chart(fig, use_container_width=True)
+
+
+
+
 
 # ----------------------
 # Tab: Batch CSV
