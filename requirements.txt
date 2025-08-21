@@ -6,3 +6,4 @@ torch
 boto3
 vaderSentiment
 plotly
+PyPDF2
