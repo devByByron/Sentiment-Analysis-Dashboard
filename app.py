@@ -255,23 +255,26 @@ with tab_batch:
 
     file = st.file_uploader("Upload CSV", type=["csv"])
     if file:
-        df_in = pd.read_csv(file)
+        # ✅ Try UTF-8 first, then fallback to Latin-1
+        try:
+            df_in = pd.read_csv(file, encoding="utf-8")
+        except UnicodeDecodeError:
+            st.warning("⚠️ Encoding issue detected, switched to Latin-1.")
+            df_in = pd.read_csv(file, encoding="latin-1")
+
         st.write("Preview:")
         st.dataframe(df_in.head(), use_container_width=True)
-
         text_col = st.selectbox("Select text column", options=list(df_in.columns))
 
         if st.button("Run batch analysis", type="primary"):
             rows_out = []
             progress = st.progress(0)
             status = st.empty()
-            total = int(len(df_in))  # ✅ make sure it's always an int
+            total = len(df_in)
 
-            # iterate only over the text column (faster than iterrows)
-            for i, txt in enumerate(df_in[text_col].astype(str)):
-                res = analyze_text(txt, use_hf, use_vader, use_aws,
-                                   hf_token, aws_key, aws_secret, aws_region)
-
+            for i, row in df_in.iterrows():
+                txt = str(row[text_col])
+                res = analyze_text(txt, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
                 for r in res:
                     if "error" in r:
                         rows_out.append({
@@ -298,8 +301,7 @@ with tab_batch:
                             "mixed": p.get("Mixed", np.nan),
                             "error": ""
                         })
-
-                if total > 0:
+                if total:
                     progress.progress(int((i + 1) / total * 100))
                     status.text(f"Processed {i + 1}/{total}")
 
@@ -330,3 +332,4 @@ with tab_batch:
             csv_merged = merged.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Download merged summary (CSV)", data=csv_merged,
                                file_name="sentiment_results_merged.csv", mime="text/csv")
+
