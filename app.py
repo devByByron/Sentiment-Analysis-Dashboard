@@ -258,17 +258,20 @@ with tab_batch:
         df_in = pd.read_csv(file)
         st.write("Preview:")
         st.dataframe(df_in.head(), use_container_width=True)
+
         text_col = st.selectbox("Select text column", options=list(df_in.columns))
 
         if st.button("Run batch analysis", type="primary"):
             rows_out = []
             progress = st.progress(0)
             status = st.empty()
-            total = len(df_in)
+            total = int(len(df_in))  # ✅ make sure it's always an int
 
-            for i, row in df_in.iterrows():
-                txt = str(row[text_col])
-                res = analyze_text(txt, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
+            # iterate only over the text column (faster than iterrows)
+            for i, txt in enumerate(df_in[text_col].astype(str)):
+                res = analyze_text(txt, use_hf, use_vader, use_aws,
+                                   hf_token, aws_key, aws_secret, aws_region)
+
                 for r in res:
                     if "error" in r:
                         rows_out.append({
@@ -295,7 +298,8 @@ with tab_batch:
                             "mixed": p.get("Mixed", np.nan),
                             "error": ""
                         })
-                if total:
+
+                if total > 0:
                     progress.progress(int((i + 1) / total * 100))
                     status.text(f"Processed {i + 1}/{total}")
 
