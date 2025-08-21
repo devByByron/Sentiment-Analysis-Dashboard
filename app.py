@@ -31,11 +31,11 @@ if "AWS_ACCESS_KEY" in st.secrets and "AWS_SECRET_KEY" in st.secrets:
     aws_secret = st.secrets["AWS_SECRET_KEY"]
     aws_region = st.secrets.get("AWS_REGION", aws_region)
 
-# Debug check (won’t leak actual secrets)
-st.sidebar.write("🔒 Secrets loaded:", {
-    "HF_TOKEN": "HF_TOKEN" in st.secrets,
-    "AWS_ACCESS_KEY": "AWS_ACCESS_KEY" in st.secrets
-})
+# # Debug check (won’t leak actual secrets)
+# st.sidebar.write("🔒 Secrets loaded:", {
+#     "HF_TOKEN": "HF_TOKEN" in st.secrets,
+#     "AWS_ACCESS_KEY": "AWS_ACCESS_KEY" in st.secrets
+# })
 
 # ----------------------
 # Sidebar configuration
@@ -210,10 +210,10 @@ with tab_single:
         run_btn = st.button("Analyze", type="primary")
         st.write("")
 
-        if use_aws:
-            st.info("AWS Comprehend is enabled. Charges may apply after free tier.", icon="⚠️")
-        else:
-            st.success("Free-only mode (Hugging Face + VADER).", icon="✅")
+        # if use_aws:
+        #     st.info("AWS Comprehend is enabled. Charges may apply after free tier.", icon="⚠️")
+        # else:
+        #     st.success("Free-only mode (Hugging Face + VADER).", icon="✅")
 
     if run_btn and text.strip():
         with st.spinner("Running analysis..."):
