@@ -1,4 +1,4 @@
---only-binary=:all:
+
 numpy==2.3.2
 pandas==2.2.2
 streamlit==1.48.0
