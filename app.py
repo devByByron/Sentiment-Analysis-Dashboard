@@ -93,43 +93,42 @@ def keyword_sentiment_vader(words: list) -> dict:
 
 def keyword_sentiment_hf(words: list, hf_token: str) -> dict:
     """
-    Classify words with Hugging Face Inference API (batch request).
-    Tries models with neutral class first, then SST-2 as fallback.
-    Returns dict: {word: {"label": POS/NEG/NEU, "score": float}} (missing if failed).
+    Classify words using Hugging Face API per word (handles neutral and SST-2 fallback).
+    Returns dict: {word: {"label": POS/NEG/NEU, "score": float}}
     """
     if not hf_token or not words:
         return {}
 
     models_to_try = [
-        "cardiffnlp/twitter-roberta-base-sentiment",         # 3-class: NEG/NEU/POS
-        "distilbert-base-uncased-finetuned-sst-2-english"    # 2-class: NEG/POS
+        "cardiffnlp/twitter-roberta-base-sentiment",  # 3-class (NEG/NEU/POS)
+        "distilbert-base-uncased-finetuned-sst-2-english"  # 2-class fallback (NEG/POS)
     ]
-
     headers = {"Authorization": f"Bearer {hf_token}"}
-    payload = {"inputs": words}  # batch
+    out = {}
 
     for model in models_to_try:
         try:
             api_url = f"https://api-inference.huggingface.co/models/{model}"
-            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
-            if response.status_code != 200:
-                if response.status_code == 503:
-                    # model loading; try next
+            # Send each word separately to avoid mismatched tokenization
+            for w in words:
+                if w.lower() in out:  # Skip already processed word
                     continue
+                payload = {"inputs": w}
+                response = requests.post(api_url, headers=headers, json=payload, timeout=10)
+                if response.status_code != 200:
+                    if response.status_code == 503:
+                        continue  # model still loading
+                    else:
+                        continue
+                data = response.json()
+
+                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+                    preds = data[0]
+                elif isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                    preds = data
                 else:
                     continue
 
-            data = response.json()
-            # Normalize shape: expect list matching 'words', each is list of {label,score}
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                # single input got expanded; normalize to list[list[...]]
-                data = [data]
-            if not (isinstance(data, list) and len(data) == len(words)):
-                # Some endpoints may return fewer entries (e.g., dropped empty tokens). Skip in that case.
-                continue
-
-            out = {}
-            for w, preds in zip(words, data):
                 scores = {}
                 for item in preds:
                     lbl = item["label"].upper()
@@ -139,15 +138,17 @@ def keyword_sentiment_hf(words: list, hf_token: str) -> dict:
                         scores["NEGATIVE"] = item["score"]
                     elif lbl in ["NEUTRAL", "NEU", "LABEL_1"]:
                         scores["NEUTRAL"] = item["score"]
+
                 if scores:
                     top = max(scores, key=scores.get)
                     out[w.lower()] = {"label": top, "score": float(scores[top])}
-            return out
+            # If we processed all words, break
+            if len(out) == len(words):
+                break
         except Exception:
             continue
 
-    # If all models failed
-    return {}
+    return out
 
 def build_keyword_df(text: str, use_vader: bool, use_hf: bool, hf_token: str) -> pd.DataFrame:
     """Create a per-word sentiment DataFrame combining VADER and HF."""
