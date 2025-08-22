@@ -8,6 +8,7 @@ import boto3
 import json
 import PyPDF2
 import io
+import re
 
 # ----------------------
 # Initialization
@@ -16,8 +17,8 @@ import io
 # Initialize VADER analyzer
 vader_analyzer = SentimentIntensityAnalyzer()
 
-# Default example text
-default_text = "I love this product! It's amazing and works perfectly."
+# Default example text (no special characters so it passes validation)
+default_text = "I love this product Its amazing and works perfectly"
 
 # ----------------------
 # Secrets & API Keys
@@ -57,6 +58,121 @@ if use_aws and (not aws_key or not aws_secret):
     aws_key = st.sidebar.text_input("AWS Access Key", type="password")
     aws_secret = st.sidebar.text_input("AWS Secret Key", type="password")
     aws_region = st.sidebar.selectbox("AWS Region", ["us-east-1", "us-west-2", "eu-west-1"])
+
+# ----------------------
+# Helpers: Validation & Keyword Sentiment
+# ----------------------
+
+VALID_TEXT_PATTERN = re.compile(r"^[A-Za-z\s]+$")
+
+def is_valid_text(s: str) -> bool:
+    """Allow only letters and spaces (blocks numbers and special characters)."""
+    return bool(VALID_TEXT_PATTERN.fullmatch(s.strip()))
+
+def extract_words(text: str) -> list:
+    """Tokenize to alphabetic words only (case-insensitive)."""
+    return re.findall(r"[A-Za-z]+", text)
+
+def keyword_sentiment_vader(words: list) -> dict:
+    """
+    Classify words using VADER lexicon.
+    Returns dict: {word: {"label": POS/NEG/NEU, "score": float}}
+    """
+    out = {}
+    for w in words:
+        lw = w.lower()
+        score = vader_analyzer.lexicon.get(lw, 0.0)
+        if score > 0:
+            label = "POSITIVE"
+        elif score < 0:
+            label = "NEGATIVE"
+        else:
+            label = "NEUTRAL"
+        out[lw] = {"label": label, "score": float(score)}
+    return out
+
+def keyword_sentiment_hf(words: list, hf_token: str) -> dict:
+    """
+    Classify words with Hugging Face Inference API (batch request).
+    Tries models with neutral class first, then SST-2 as fallback.
+    Returns dict: {word: {"label": POS/NEG/NEU, "score": float}} (missing if failed).
+    """
+    if not hf_token or not words:
+        return {}
+
+    models_to_try = [
+        "cardiffnlp/twitter-roberta-base-sentiment",         # 3-class: NEG/NEU/POS
+        "distilbert-base-uncased-finetuned-sst-2-english"    # 2-class: NEG/POS
+    ]
+
+    headers = {"Authorization": f"Bearer {hf_token}"}
+    payload = {"inputs": words}  # batch
+
+    for model in models_to_try:
+        try:
+            api_url = f"https://api-inference.huggingface.co/models/{model}"
+            response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+            if response.status_code != 200:
+                if response.status_code == 503:
+                    # model loading; try next
+                    continue
+                else:
+                    continue
+
+            data = response.json()
+            # Normalize shape: expect list matching 'words', each is list of {label,score}
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                # single input got expanded; normalize to list[list[...]]
+                data = [data]
+            if not (isinstance(data, list) and len(data) == len(words)):
+                # Some endpoints may return fewer entries (e.g., dropped empty tokens). Skip in that case.
+                continue
+
+            out = {}
+            for w, preds in zip(words, data):
+                scores = {}
+                for item in preds:
+                    lbl = item["label"].upper()
+                    if lbl in ["POSITIVE", "POS", "LABEL_2"]:
+                        scores["POSITIVE"] = item["score"]
+                    elif lbl in ["NEGATIVE", "NEG", "LABEL_0"]:
+                        scores["NEGATIVE"] = item["score"]
+                    elif lbl in ["NEUTRAL", "NEU", "LABEL_1"]:
+                        scores["NEUTRAL"] = item["score"]
+                if scores:
+                    top = max(scores, key=scores.get)
+                    out[w.lower()] = {"label": top, "score": float(scores[top])}
+            return out
+        except Exception:
+            continue
+
+    # If all models failed
+    return {}
+
+def build_keyword_df(text: str, use_vader: bool, use_hf: bool, hf_token: str) -> pd.DataFrame:
+    """Create a per-word sentiment DataFrame combining VADER and HF."""
+    words = sorted(set(w.lower() for w in extract_words(text)))
+    if not words:
+        return pd.DataFrame(columns=["word", "VADER_label", "VADER_score", "HF_label", "HF_score"])
+
+    vader_map = keyword_sentiment_vader(words) if use_vader else {}
+    hf_map = keyword_sentiment_hf(words, hf_token) if use_hf and hf_token else {}
+
+    rows = []
+    for w in words:
+        v = vader_map.get(w, {"label": None, "score": None})
+        h = hf_map.get(w, {"label": None, "score": None})
+        rows.append({
+            "word": w,
+            "VADER_label": v["label"],
+            "VADER_score": v["score"],
+            "HF_label": h["label"],
+            "HF_score": h["score"]
+        })
+    df = pd.DataFrame(rows)
+    # Order by VADER score magnitude then HF score (desc)
+    df = df.sort_values(by=["VADER_score", "HF_score"], ascending=[False, False], na_position="last")
+    return df.reset_index(drop=True)
 
 # ----------------------
 # File Loader Functions
@@ -118,7 +234,7 @@ def load_file(file):
             
             for page_num, page in enumerate(pdf_reader.pages, 1):
                 page_text = page.extract_text()
-                if page_text.strip():
+                if page_text and page_text.strip():
                     # Split page text into sentences
                     sentences = [s.strip() for s in page_text.split('.') if s.strip()]
                     for i, sentence in enumerate(sentences, 1):
@@ -185,12 +301,16 @@ def analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret
             ]
             
             success = False
+            last_status = None
+            last_text = None
             for model in models_to_try:
                 api_url = f"https://api-inference.huggingface.co/models/{model}"
                 headers = {"Authorization": f"Bearer {hf_token}"}
                 payload = {"inputs": text}
                 
                 response = requests.post(api_url, headers=headers, json=payload, timeout=15)
+                last_status = response.status_code
+                last_text = response.text[:200]
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -232,7 +352,7 @@ def analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret
             if not success:
                 results.append({
                     "provider": "HuggingFace", 
-                    "error": f"All models failed. Last error: HTTP {response.status_code}: {response.text[:200]}"
+                    "error": f"All models failed. Last error: HTTP {last_status}: {last_text}"
                 })
                 
         except Exception as e:
@@ -311,49 +431,80 @@ tab_single, tab_batch = st.tabs(["Single Text Analysis", "Batch File Analysis"])
 # ----------------------
 with tab_single:
     st.subheader("Analyze a single text")
-    text = st.text_area("Enter text to analyze:", value=default_text, height=150)
+    text = st.text_area(
+        "Enter text to analyze (letters and spaces only):",
+        value=default_text,
+        height=150
+    )
     colA, colB = st.columns([1, 2])
 
     with colA:
         run_btn = st.button("Analyze", type="primary")
 
-    if run_btn and text.strip():
-        with st.spinner("Running analysis..."):
-            results = analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
-            df = results_to_dataframe(results)
+    if run_btn:
+        # ---- Validation (prevent numbers and special characters) ----
+        if not text.strip():
+            st.warning("Please enter some text.")
+        elif not is_valid_text(text):
+            st.error("Invalid input. Only letters and spaces are allowed (no numbers or special characters).")
+        else:
+            with st.spinner("Running analysis..."):
+                results = analyze_text(text, use_hf, use_vader, use_aws, hf_token, aws_key, aws_secret, aws_region)
+                df = results_to_dataframe(results)
 
-        with colB:
-            st.subheader("Results")
-            st.dataframe(df, use_container_width=True)
+            with colB:
+                st.subheader("Results")
+                st.dataframe(df, use_container_width=True)
 
-            st.markdown("### Provider Insights")
-            for r in results:
-                with st.container(border=True):
-                    if "error" in r:
-                        st.error(f"**{r.get('provider','')}**: {r['error']}")
-                    else:
-                        p = r["probs"]
-                        st.markdown(f"**{r['provider']}**")
-                        st.write(f"**Label:** {r['label']}  |  **Confidence:** {round(r['score'], 4)}")
-                        pie_df = pd.DataFrame({
-                            "Class": ["Positive", "Negative", "Neutral", "Mixed"],
-                            "Probability": [p["Positive"], p["Negative"], p["Neutral"], p["Mixed"]]
-                        })
-                        pie_fig = px.pie(pie_df, names="Class", values="Probability",
-                                         title=f"Distribution - {r['provider']}")
-                        st.plotly_chart(pie_fig, use_container_width=True)
+                st.markdown("### Provider Insights")
+                for r in results:
+                    with st.container(border=True):
+                        if "error" in r:
+                            st.error(f"**{r.get('provider','')}**: {r['error']}")
+                        else:
+                            p = r["probs"]
+                            st.markdown(f"**{r['provider']}**")
+                            st.write(f"**Label:** {r['label']}  |  **Confidence:** {round(r['score'], 4)}")
+                            pie_df = pd.DataFrame({
+                                "Class": ["Positive", "Negative", "Neutral", "Mixed"],
+                                "Probability": [p["Positive"], p["Negative"], p["Neutral"], p["Mixed"]]
+                            })
+                            pie_fig = px.pie(pie_df, names="Class", values="Probability",
+                                             title=f"Distribution - {r['provider']}")
+                            st.plotly_chart(pie_fig, use_container_width=True)
 
-            st.markdown("### Provider Comparison (Bar Chart)")
-            plot_df = df.melt(id_vars=["Provider", "Label"],
-                              value_vars=["Positive", "Negative", "Neutral", "Mixed"],
-                              var_name="Class", value_name="Probability").dropna()
-            if not plot_df.empty:
-                fig = px.bar(plot_df, x="Provider", y="Probability", color="Class",
-                             barmode="group", text="Probability",
-                             title="Class Probabilities by Provider")
-                fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-                fig.update_layout(yaxis_range=[0, 1], xaxis_title="", yaxis_title="Probability")
-                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("### Provider Comparison (Bar Chart)")
+                plot_df = df.melt(id_vars=["Provider", "Label"],
+                                  value_vars=["Positive", "Negative", "Neutral", "Mixed"],
+                                  var_name="Class", value_name="Probability").dropna()
+                if not plot_df.empty:
+                    fig = px.bar(plot_df, x="Provider", y="Probability", color="Class",
+                                 barmode="group", text="Probability",
+                                 title="Class Probabilities by Provider")
+                    fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+                    fig.update_layout(yaxis_range=[0, 1], xaxis_title="", yaxis_title="Probability")
+                    st.plotly_chart(fig, use_container_width=True)
+
+                # -------- Keyword Sentiment (VADER + HF) --------
+                st.markdown("### Keyword Sentiment (per-word)")
+                kw_df = build_keyword_df(text, use_vader, use_hf, hf_token)
+                if not kw_df.empty:
+                    st.dataframe(kw_df, use_container_width=True)
+
+                    col_kw1, col_kw2 = st.columns(2)
+                    with col_kw1:
+                        st.markdown("**VADER word sets**")
+                        st.write("Positive:", ", ".join(kw_df.loc[kw_df["VADER_label"] == "POSITIVE", "word"]))
+                        st.write("Neutral:", ", ".join(kw_df.loc[kw_df["VADER_label"] == "NEUTRAL", "word"]))
+                        st.write("Negative:", ", ".join(kw_df.loc[kw_df["VADER_label"] == "NEGATIVE", "word"]))
+                    with col_kw2:
+                        if use_hf and hf_token:
+                            st.markdown("**Hugging Face word sets**")
+                            st.write("Positive:", ", ".join(kw_df.loc[kw_df["HF_label"] == "POSITIVE", "word"]))
+                            st.write("Neutral:", ", ".join(kw_df.loc[kw_df["HF_label"] == "NEUTRAL", "word"]))
+                            st.write("Negative:", ", ".join(kw_df.loc[kw_df["HF_label"] == "NEGATIVE", "word"]))
+                        else:
+                            st.info("Enable Hugging Face with a valid token to see HF word sets.")
 
 # ----------------------
 # Tab: Batch File Analysis
